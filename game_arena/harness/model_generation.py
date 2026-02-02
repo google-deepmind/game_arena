@@ -14,12 +14,53 @@
 
 """Library for generating model responses."""
 
+import dataclasses
 import datetime
+import functools
+import time
 import traceback
-from typing import Any, Generic, Mapping, Protocol, runtime_checkable
+from typing import Any, Callable, Generic, Mapping, Protocol, TypeVar, runtime_checkable
+
 from absl import logging
-from game_arena.harness import tournament_util
+import dataclasses_json
 import tenacity
+
+
+_THOUGHT_TAG_START = '<think>'
+_THOUGHT_TAG_END = '</think>'
+
+
+ModelTextInputT = TypeVar('ModelTextInputT')
+ModelImageTextInputT = TypeVar('ModelImageTextInputT')
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ModelTextInput:
+  prompt_text: str
+  system_instruction: str | None = None
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class ModelImageTextInput(ModelTextInput):
+  prompt_image_bytes: bytes
+  prompt_image_mime_type: str
+  prompt_text_preceding_image: str | None = None
+  prompt_text_following_image: str | None = None
+
+
+@dataclasses_json.dataclass_json
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class GenerateReturn:
+  # It's not possible to always correctly split the main response and thoughts:
+  main_response: str
+  main_response_and_thoughts: str
+  request_for_logging: dict[str, Any] | None = None
+  response_for_logging: dict[str, Any] | None = None
+  generation_tokens: int | None = None
+  prompt_tokens: int | None = None
+  reasoning_tokens: int | None = None
+  total_tokens: int | None = None
+  duration_success_only_secs: int | None = None
 
 
 def _log_retry_warning(retry_state: tenacity.RetryCallState):
@@ -32,6 +73,27 @@ def _log_retry_warning(retry_state: tenacity.RetryCallState):
       traceback_str,
       retry_state,
   )
+
+
+_GenerateFunc = Callable[..., GenerateReturn]
+
+
+def _timing_decorator(generate_func: _GenerateFunc) -> _GenerateFunc:
+  """Decorator to add timing information to a generate function."""
+
+  @functools.wraps(generate_func)
+  def wrapper(*args, **kwargs) -> GenerateReturn:
+    start_time = time.perf_counter()
+    generate_return = generate_func(*args, **kwargs)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    generate_return = dataclasses.replace(
+        generate_return,
+        duration_success_only_secs=elapsed_time,
+    )
+    return generate_return
+
+  return wrapper
 
 
 class DoNotRetryError(Exception):
@@ -79,7 +141,7 @@ _retry_decorator = tenacity.retry(
 
 
 @runtime_checkable
-class Model(Generic[tournament_util.ModelTextInputT], Protocol):
+class Model(Generic[ModelTextInputT], Protocol):
   """Large language model with text input support."""
 
   def __init__(
@@ -108,8 +170,8 @@ class Model(Generic[tournament_util.ModelTextInputT], Protocol):
 
   def generate_with_text_input(
       self,
-      model_input: tournament_util.ModelTextInputT,
-  ) -> tournament_util.GenerateReturn:
+      model_input: ModelTextInputT,
+  ) -> GenerateReturn:
     ...
 
   def __init_subclass__(cls, **kwargs):
@@ -118,20 +180,18 @@ class Model(Generic[tournament_util.ModelTextInputT], Protocol):
       setattr(
           cls,
           'generate_with_text_input',
-          _retry_decorator(cls.generate_with_text_input),
+          _retry_decorator(_timing_decorator(cls.generate_with_text_input)),
       )
 
 
 @runtime_checkable
-class MultimodalModel(
-    Model, Generic[tournament_util.ModelImageTextInputT], Protocol
-):
+class MultimodalModel(Model, Generic[ModelImageTextInputT], Protocol):
   """Large language model with text and image input support."""
 
   def generate_with_image_text_input(
       self,
-      model_input: tournament_util.ModelImageTextInputT,
-  ) -> tournament_util.GenerateReturn:
+      model_input: ModelImageTextInputT,
+  ) -> GenerateReturn:
     ...
 
   def __init_subclass__(cls, **kwargs):
@@ -140,5 +200,33 @@ class MultimodalModel(
       setattr(
           cls,
           'generate_with_image_text_input',
-          _retry_decorator(cls.generate_with_image_text_input),
+          _retry_decorator(
+              _timing_decorator(cls.generate_with_image_text_input)
+          ),
       )
+
+
+def separate_main_response_and_thoughts(
+    response: str,
+    thought_tag_start: str = _THOUGHT_TAG_START,
+    thought_tag_end: str = _THOUGHT_TAG_END,
+) -> tuple[str, str] | None:
+  """Separates the main response and thoughts from a response.
+
+  Args:
+    response: The response from the model.
+    thought_tag_start: The start tag for thoughts.
+    thought_tag_end: The end tag for thoughts.
+
+  Returns:
+    A tuple of the main response and thoughts, or None if the tags are not
+    present.
+  """
+  if thought_tag_start not in response:
+    return None
+  else:
+    thoughts_and_response = response.split(thought_tag_start)[1]
+    if thought_tag_end in thoughts_and_response:
+      thoughts = thoughts_and_response.split(thought_tag_end)[0]
+      main_response = thoughts_and_response.split(thought_tag_end)[1]
+      return main_response, thoughts

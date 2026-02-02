@@ -22,6 +22,7 @@ from game_arena.harness import model_generation_sdk
 
 class ModelRegistry(enum.Enum):
   """Model registry for Kaggle Game Arena."""
+
   # keep-sorted start
   ANTHROPIC_CLAUDE_OPUS_4 = "claude-opus-4-20250514"
   ANTHROPIC_CLAUDE_SONNET_4 = "claude-sonnet-4-20250514"
@@ -30,6 +31,7 @@ class ModelRegistry(enum.Enum):
   GEMINI_2_5_PRO = "gemini-2.5-pro"
   KIMI_K2 = "moonshotai/Kimi-K2-Instruct"
   OPENAI_GPT_4_1 = "gpt-4.1-2025-04-14"
+  OPENAI_GPT_5 = "gpt-5-2025-08-07"
   OPENAI_O3 = "o3-2025-04-16"
   OPENAI_O4_MINI = "o4-mini-2025-04-16"
   QWEN_3 = "Qwen/Qwen3-235B-A22B-Thinking-2507"
@@ -44,7 +46,7 @@ class ModelRegistry(enum.Enum):
             "api_options": {"stream": True},
             "model_options": {
                 "max_tokens": 64000,
-                "thinking": {"type": "enabled", "budget_tokens": 32000}
+                "thinking": {"type": "enabled", "budget_tokens": 32000},
             },
         }
         kwargs = default_kwargs | kwargs
@@ -58,7 +60,7 @@ class ModelRegistry(enum.Enum):
             "api_options": {"stream": True},
             "model_options": {
                 "max_tokens": 32000,
-                "thinking": {"type": "enabled", "budget_tokens": 24000}
+                "thinking": {"type": "enabled", "budget_tokens": 24000},
             },
         }
         kwargs = default_kwargs | kwargs
@@ -68,9 +70,11 @@ class ModelRegistry(enum.Enum):
             **kwargs,
         )
       case (
+          # keep-sorted start
           ModelRegistry.DEEPSEEK_R1
           | ModelRegistry.KIMI_K2
           | ModelRegistry.QWEN_3
+          # keep-sorted end
       ):
         return model_generation_http.TogetherAIModel(
             model_name=self.value,
@@ -95,9 +99,12 @@ class ModelRegistry(enum.Enum):
             **kwargs,
         )
       case (
+          # keep-sorted start
           ModelRegistry.OPENAI_GPT_4_1
+          | ModelRegistry.OPENAI_GPT_5
           | ModelRegistry.OPENAI_O3
           | ModelRegistry.OPENAI_O4_MINI
+          # keep-sorted end
       ):
         return model_generation_sdk.OpenAIChatCompletionsModel(
             model_name=self.value,

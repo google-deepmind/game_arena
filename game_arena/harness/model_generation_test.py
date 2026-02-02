@@ -14,10 +14,11 @@
 
 """Tests for model generation base implementations."""
 
+from unittest import mock
+
 from absl.testing import absltest
 
 from game_arena.harness import model_generation
-from game_arena.harness import tournament_util
 import tenacity
 
 
@@ -44,8 +45,8 @@ class MockModelForRetryTest(model_generation.Model):
     return self._generate_call_count
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     """Generates a response, cycling through pre-configured side effects."""
     self._generate_call_count += 1
     if self._side_effect_queue:
@@ -54,7 +55,7 @@ class MockModelForRetryTest(model_generation.Model):
         raise effect
       return effect
     # Default success response if no side effects are configured.
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         main_response='success', main_response_and_thoughts='success'
     )
 
@@ -73,14 +74,14 @@ class RetryTest(absltest.TestCase):
     model.set_side_effects([
         Exception('transient error'),
         Exception('another transient error'),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='final success',
             main_response_and_thoughts='final success',
         ),
     ])
 
     response = model.generate_with_text_input(
-        tournament_util.ModelTextInput(prompt_text='test')
+        model_generation.ModelTextInput(prompt_text='test')
     )
 
     self.assertEqual(response.main_response, 'final success')
@@ -101,10 +102,65 @@ class RetryTest(absltest.TestCase):
 
     with self.assertRaisesRegex(Exception, 'persistent error'):
       model.generate_with_text_input(
-          tournament_util.ModelTextInput(prompt_text='test')
+          model_generation.ModelTextInput(prompt_text='test')
       )
 
     self.assertEqual(model.generate_call_count, 3)
+
+
+class TimingDecoratorTest(absltest.TestCase):
+
+  @mock.patch('time.perf_counter')
+  def test_timing_decorator_adds_timing_info(self, mock_perf_counter):
+    """Tests that the timing decorator adds timing information."""
+    mock_perf_counter.side_effect = [1.0, 2.5]  # Start and end times
+
+    @model_generation._timing_decorator
+    def fake_generate_func(*args, **kwargs) -> model_generation.GenerateReturn:
+      del args, kwargs  # Unused.
+      return model_generation.GenerateReturn(
+          main_response='test', main_response_and_thoughts='test'
+      )
+
+    response = fake_generate_func()
+
+    self.assertEqual(
+        response.duration_success_only_secs, 1.5
+    )
+
+  @mock.patch('time.perf_counter')
+  def test_timing_decorator_with_retries(self, mock_perf_counter):
+    """Tests that timing is correct with retries."""
+    model = MockModelForRetryTest()
+    model.generate_with_text_input.retry.stop = tenacity.stop_after_attempt(3)
+    model.generate_with_text_input.retry.wait = tenacity.wait_none()
+
+    # The decorator is entered once per attempt. For failed attempts, the
+    # exception prevents the second perf_counter call.
+    mock_perf_counter.side_effect = [
+        1.0,  # Start of first call (fail)
+        3.0,  # Start of second call (fail)
+        6.0, 9.5,  # Start and end of third call (success)
+    ]
+
+    model.set_side_effects([
+        Exception('transient error'),
+        Exception('another transient error'),
+        model_generation.GenerateReturn(
+            main_response='final success',
+            main_response_and_thoughts='final success',
+        ),
+    ])
+
+    response = model.generate_with_text_input(
+        model_generation.ModelTextInput(prompt_text='test')
+    )
+
+    # The duration should only be for the final, successful call.
+    self.assertEqual(
+        response.duration_success_only_secs, 3.5
+    )
+    self.assertEqual(mock_perf_counter.call_count, 4)
 
 
 if __name__ == '__main__':

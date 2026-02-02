@@ -25,6 +25,7 @@ dependencies = [
   "immutabledict",
   "open_spiel",
   "openai",
+  "pillow",
   "requests",
   "tenacity",
   # keep-sorted end
@@ -72,3 +73,15 @@ exclude = [
   # Do not release tests files on PyPI
   "**/*_test.py",
 ]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 80
+indent-width = 2
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

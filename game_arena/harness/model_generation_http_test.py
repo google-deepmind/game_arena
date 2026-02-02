@@ -22,8 +22,8 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 import aiohttp
+from game_arena.harness import model_generation
 from game_arena.harness import model_generation_http
-from game_arena.harness import tournament_util
 
 
 class ModelGenerationHttpTest(parameterized.TestCase):
@@ -69,14 +69,14 @@ class ModelGenerationHttpTest(parameterized.TestCase):
       self, response, expected
   ):
     self.assertEqual(
-        model_generation_http._deepseek_separate_main_response_and_thoughts(
+        model_generation.separate_main_response_and_thoughts(
             response
         ),
         expected,
     )
 
   def test_create_image_text_content(self):
-    model_input = tournament_util.ModelImageTextInput(
+    model_input = model_generation.ModelImageTextInput(
         prompt_text='My prompt',
         prompt_image_bytes=b'someimagedata',
         prompt_image_mime_type='image/png',
@@ -87,6 +87,27 @@ class ModelGenerationHttpTest(parameterized.TestCase):
             'type': 'image_url',
             'image_url': {'url': 'data:image/png;base64,c29tZWltYWdlZGF0YQ=='},
         },
+    ]
+    self.assertEqual(
+        model_generation_http._create_image_text_content(model_input),
+        expected_content,
+    )
+
+  def test_create_image_text_content_split_prompt(self):
+    model_input = model_generation.ModelImageTextInput(
+        prompt_text='',
+        prompt_text_preceding_image='My prompt before',
+        prompt_text_following_image='My prompt after',
+        prompt_image_bytes=b'someimagedata',
+        prompt_image_mime_type='image/png',
+    )
+    expected_content = [
+        {'type': 'text', 'text': 'My prompt before'},
+        {
+            'type': 'image_url',
+            'image_url': {'url': 'data:image/png;base64,c29tZWltYWdlZGF0YQ=='},
+        },
+        {'type': 'text', 'text': 'My prompt after'},
     ]
     self.assertEqual(
         model_generation_http._create_image_text_content(model_input),
@@ -121,7 +142,7 @@ class XAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main response',
             main_response_and_thoughts='main response\n\nreasoning',
             request_for_logging={
@@ -165,7 +186,7 @@ class XAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main response',
             main_response_and_thoughts='',
             request_for_logging={
@@ -385,7 +406,7 @@ class TogetherAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main response',
             main_response_and_thoughts='',
             request_for_logging={
@@ -421,7 +442,7 @@ class TogetherAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main',
             main_response_and_thoughts='<think>thought</think>main',
             request_for_logging={
@@ -459,7 +480,7 @@ class TogetherAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main response',
             main_response_and_thoughts='',
             request_for_logging={
@@ -497,7 +518,7 @@ class TogetherAIModelTest(absltest.TestCase):
 
     self.assertEqual(
         response,
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='main response',
             main_response_and_thoughts='',
             request_for_logging={

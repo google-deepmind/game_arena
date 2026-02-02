@@ -17,12 +17,19 @@
 import collections
 import concurrent
 import dataclasses
+import enum
 import random
 from typing import Any, Callable, Protocol, Sequence
 
 from game_arena.harness import model_generation
 from game_arena.harness import parsers
-from game_arena.harness import tournament_util
+
+
+class MoveType(enum.Enum):
+  LEGAL = "legal"
+  ILLEGAL = "illegal"
+  NO_ACTION_TAG = "no_action_tag"
+  # TODO(google-deepmind): introduce UNPARSABLE type?
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -30,11 +37,11 @@ class SamplerOutput:
   action: str | None
   extracted_action: str | None
   matched_action: str | None
-  generate_returns: Sequence[tournament_util.GenerateReturn]
+  generate_returns: Sequence[model_generation.GenerateReturn]
   # Auxiliary outputs may contain frequency, rethinking rule feedback, etc.
   auxiliary_outputs: dict[str, Any]
   # Not all samplers determine legality:
-  move_type: tournament_util.MoveType | None = None
+  move_type: MoveType | None = None
 
 
 class Sampler(Protocol):
@@ -44,7 +51,7 @@ class Sampler(Protocol):
     self._model = model
 
   def sample_action_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
+      self, model_input: model_generation.ModelTextInput
   ) -> SamplerOutput:
     ...
 
@@ -53,7 +60,7 @@ class MultimodalSampler(Sampler, Protocol):
   """Generic multimodal sampler."""
 
   def sample_action_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
+      self, model_input: model_generation.ModelImageTextInput
   ) -> SamplerOutput:
     ...
 
@@ -84,14 +91,14 @@ class MajorityVoteSampler(Sampler):
   # to generic inputs:
   def _sample_action(
       self,
-      generate_fn: Callable[[Any], tournament_util.GenerateReturn],
+      generate_fn: Callable[[Any], model_generation.GenerateReturn],
       model_input: Any,
   ) -> SamplerOutput:
     """Model type and input type agnostic majority voting sampler."""
 
     def _generate_then_parse(
         model_input: Any,
-    ) -> tuple[str | None, tournament_util.GenerateReturn]:
+    ) -> tuple[str | None, model_generation.GenerateReturn]:
       response = generate_fn(model_input)
       return (
           self._parser.parse(
@@ -146,7 +153,7 @@ class MajorityVoteSampler(Sampler):
       )
 
   def sample_action_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
+      self, model_input: model_generation.ModelTextInput
   ) -> SamplerOutput:
     return self._sample_action(
         self._model.generate_with_text_input, model_input
@@ -166,7 +173,7 @@ class MajorityVoteMultimodalSampler(MajorityVoteSampler, MultimodalSampler):
     super().__init__(model, num_samples, parser, max_workers)
 
   def sample_action_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
+      self, model_input: model_generation.ModelImageTextInput
   ) -> SamplerOutput:
     assert isinstance(self._model, model_generation.MultimodalModel)
     return self._sample_action(

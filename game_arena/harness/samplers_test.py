@@ -21,7 +21,6 @@ from absl.testing import absltest
 from game_arena.harness import model_generation
 from game_arena.harness import parsers
 from game_arena.harness import samplers
-from game_arena.harness import tournament_util
 
 
 class MajorityVoteSamplerTest(absltest.TestCase):
@@ -29,13 +28,13 @@ class MajorityVoteSamplerTest(absltest.TestCase):
   def test_sample_action_with_clear_majority(self):
     mock_model = mock.Mock(spec=model_generation.Model)
     mock_model.generate_with_text_input.side_effect = [
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='A', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='B', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='A', main_response_and_thoughts=''
         ),
     ]
@@ -45,7 +44,7 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     sampler = samplers.MajorityVoteSampler(
         model=mock_model, num_samples=3, parser=mock_parser
     )
-    model_input = tournament_util.ModelTextInput(
+    model_input = model_generation.ModelTextInput(
         prompt_text='prompt',
     )
     sampler_output = sampler.sample_action_with_text_input(model_input)
@@ -54,13 +53,13 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     self.assertEqual(
         sampler_output.generate_returns,
         [
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='A', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='B', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='A', main_response_and_thoughts=''
             ),
         ],
@@ -74,10 +73,10 @@ class MajorityVoteSamplerTest(absltest.TestCase):
   def test_sample_action_with_tie(self):
     mock_model = mock.Mock(spec=model_generation.Model)
     mock_model.generate_with_text_input.side_effect = [
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='A', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='B', main_response_and_thoughts=''
         ),
     ]
@@ -87,7 +86,7 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     sampler = samplers.MajorityVoteSampler(
         model=mock_model, num_samples=2, parser=mock_parser
     )
-    model_input = tournament_util.ModelTextInput(
+    model_input = model_generation.ModelTextInput(
         prompt_text='prompt',
     )
     sampler_output = sampler.sample_action_with_text_input(model_input)
@@ -98,10 +97,10 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     self.assertEqual(
         sampler_output.generate_returns,
         [
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='A', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='B', main_response_and_thoughts=''
             ),
         ],
@@ -115,10 +114,10 @@ class MajorityVoteSamplerTest(absltest.TestCase):
   def test_sample_action_with_no_valid_actions(self):
     mock_model = mock.Mock(spec=model_generation.Model)
     mock_model.generate_with_text_input.side_effect = [
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='', main_response_and_thoughts=''
         ),
     ]
@@ -128,7 +127,7 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     sampler = samplers.MajorityVoteSampler(
         model=mock_model, num_samples=2, parser=mock_parser
     )
-    model_input = tournament_util.ModelTextInput(
+    model_input = model_generation.ModelTextInput(
         prompt_text='prompt',
     )
     sampler_output = sampler.sample_action_with_text_input(model_input)
@@ -137,10 +136,10 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     self.assertEqual(
         sampler_output.generate_returns,
         [
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='', main_response_and_thoughts=''
             ),
         ],
@@ -151,13 +150,13 @@ class MajorityVoteSamplerTest(absltest.TestCase):
   def test_sample_action_with_image_input(self):
     mock_model = mock.Mock(spec=model_generation.MultimodalModel)
     mock_model.generate_with_image_text_input.side_effect = [
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='A', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='B', main_response_and_thoughts=''
         ),
-        tournament_util.GenerateReturn(
+        model_generation.GenerateReturn(
             main_response='A', main_response_and_thoughts=''
         ),
     ]
@@ -167,7 +166,7 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     sampler = samplers.MajorityVoteMultimodalSampler(
         model=mock_model, num_samples=3, parser=mock_parser
     )
-    model_input = tournament_util.ModelImageTextInput(
+    model_input = model_generation.ModelImageTextInput(
         prompt_text='prompt',
         prompt_image_bytes=b'image_bytes',
         prompt_image_mime_type='image/png',
@@ -178,13 +177,13 @@ class MajorityVoteSamplerTest(absltest.TestCase):
     self.assertEqual(
         sampler_output.generate_returns,
         [
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='A', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='B', main_response_and_thoughts=''
             ),
-            tournament_util.GenerateReturn(
+            model_generation.GenerateReturn(
                 main_response='A', main_response_and_thoughts=''
             ),
         ],

@@ -23,13 +23,16 @@ import anthropic
 from anthropic import _types as anthropic_internal_types
 from anthropic import types as anthropic_types
 from game_arena.harness import model_generation
-from game_arena.harness import tournament_util
+from game_arena.harness import telemetry
 from google import genai as google_genai
 from google.genai import types as google_genai_types
+import httpx
 import openai
 from openai import _types as openai_internal_types
 from openai.types.chat import chat_completion as openai_chat_completion_types  
 from openai.types.chat import chat_completion_chunk
+
+_TELEMETRY = telemetry.get_logger(__name__)
 
 _ANTHROPIC_MAX_TOKENS = {
     # Max tokens is a required parameter for the API. Therefore default to the
@@ -91,7 +94,7 @@ class AIStudioModel(model_generation.MultimodalModel):
       self,
       contents: Sequence[str | google_genai_types.Part],
       system_instruction: str | None = None,
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     if self._model_options is None:
       self._model_options = {}
     if self._api_options is None:
@@ -136,9 +139,10 @@ class AIStudioModel(model_generation.MultimodalModel):
     prompt_tokens = None
     reasoning_tokens = None
     if response.usage_metadata is not None:
-      generation_tokens = response.usage_metadata.candidates_token_count
+      candidate_tokens = response.usage_metadata.candidates_token_count
       prompt_tokens = response.usage_metadata.prompt_token_count
       reasoning_tokens = response.usage_metadata.thoughts_token_count
+      generation_tokens = (candidate_tokens or 0) + (reasoning_tokens or 0)
 
     request_for_logging = {
         "model": self._model_name,
@@ -146,7 +150,7 @@ class AIStudioModel(model_generation.MultimodalModel):
         "config": config.to_json_dict(),
     }
 
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         main_response=main_response,
         main_response_and_thoughts=main_response_and_thoughts,
         request_for_logging=request_for_logging,
@@ -157,21 +161,33 @@ class AIStudioModel(model_generation.MultimodalModel):
     )
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     contents = [model_input.prompt_text]
     return self._generate(contents, model_input.system_instruction)
 
   def generate_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
-  ) -> tournament_util.GenerateReturn:
-    contents = [
-        model_input.prompt_text,
-        google_genai_types.Part.from_bytes(
-            data=model_input.prompt_image_bytes,
-            mime_type=model_input.prompt_image_mime_type,
-        ),
-    ]
+      self, model_input: model_generation.ModelImageTextInput
+  ) -> model_generation.GenerateReturn:
+    image_content = google_genai_types.Part.from_bytes(
+        data=model_input.prompt_image_bytes,
+        mime_type=model_input.prompt_image_mime_type,
+    )
+    if (
+        model_input.prompt_text_preceding_image is not None
+        and model_input.prompt_text_following_image is not None
+    ):
+      assert not model_input.prompt_text
+      contents = [
+          model_input.prompt_text_preceding_image,
+          image_content,
+          model_input.prompt_text_following_image,
+      ]
+    else:
+      contents = [
+          model_input.prompt_text,
+          image_content,
+      ]
     return self._generate(contents, model_input.system_instruction)
 
 
@@ -183,6 +199,7 @@ class _OpenAIChatCompletionsStreamReturn:
   completion_tokens: int | None
   prompt_tokens: int | None
   reasoning_tokens: int | None
+  total_tokens: int | None
   response_chunks: Sequence[chat_completion_chunk.ChatCompletionChunk]
 
 
@@ -194,6 +211,7 @@ def _process_openai_chat_completions_stream(
   completion_tokens = None
   prompt_tokens = None
   reasoning_tokens = None
+  total_tokens = None
   response_chunks = []
 
   try:
@@ -220,6 +238,8 @@ def _process_openai_chat_completions_stream(
           reasoning_tokens = (
               reasoning_tokens or 0
           ) + chunk.usage.completion_tokens_details.reasoning_tokens
+        if chunk.usage.total_tokens is not None:
+          total_tokens = (total_tokens or 0) + chunk.usage.total_tokens
   except openai.APIError as e:
     logging.exception("Error during OpenAI stream processing: %s", e)
     raise
@@ -229,8 +249,36 @@ def _process_openai_chat_completions_stream(
       completion_tokens=completion_tokens,
       prompt_tokens=prompt_tokens,
       reasoning_tokens=reasoning_tokens,
+      total_tokens=total_tokens,
       response_chunks=response_chunks,
   )
+
+
+def _unpack_thoughts_from_openai_response(
+    response: str,
+) -> tuple[str, str]:
+  """Unpacks thoughts from an OpenAI response.
+
+  Some models accessed via Chat Completions API may return thoughts or a summary
+  of thoughts wrapped in a <think>...</think> tag. This function unpacks the
+  thoughts from the response.
+
+  Args:
+    response: The response from the model.
+
+  Returns:
+    A tuple of the main response and main_response_and_thoughts.
+  """
+
+  if "<think>" in response and "</think>" in response:
+    main_response_and_thoughts = response
+    separated = model_generation.separate_main_response_and_thoughts(response)
+    assert separated is not None
+    main_response, _ = separated
+  else:
+    main_response_and_thoughts = ""
+    main_response = response
+  return main_response, main_response_and_thoughts
 
 
 class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
@@ -243,19 +291,20 @@ class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
       model_options: Mapping[str, Any] | None = None,
       api_options: Mapping[str, Any] | None = None,
       api_key: str | None = None,
+      base_url: str | None = None,
   ):
     super().__init__(
         model_name, model_options=model_options, api_options=api_options
     )
     # If API key is None, defaults to OPENAI_API_KEY in environment.
-    self._client = openai.OpenAI(api_key=api_key)
+    self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
 
   # TODO(google-deepmind): Add error handling.
   def _generate(
       self,
       content: Sequence[Mapping[str, Any]],
       system_instruction: str | None = None,
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     messages = []
     if system_instruction is not None:
       messages.append({"role": "developer", "content": system_instruction})
@@ -276,30 +325,51 @@ class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
         "top_p": self._model_options.get(
             "top_p", openai_internal_types.NotGiven()
         ),
-        "max_tokens": self._model_options.get(
-            "max_output_tokens", openai_internal_types.NotGiven()
-        ),
-        "reasoning_effort": self._model_options.get(
-            "reasoning_effort", openai_internal_types.NotGiven()
+        "max_completion_tokens": self._model_options.get(
+            "max_completion_tokens", openai_internal_types.NotGiven()
         ),
     }
+    if "reasoning_effort" in self._model_options:
+      config["reasoning_effort"] = self._model_options["reasoning_effort"]
+    elif "thinking_budget" in self._model_options:
+      extra_body = {
+          "extra_body": {
+              "google": {
+                  "thinking_config": {
+                      "thinking_budget": self._model_options["thinking_budget"],
+                      "include_thoughts": True,
+                  },
+                  "thought_tag_marker": "think",
+              }
+          }
+      }
+      config["extra_body"] = extra_body
 
     if self._api_options.get("stream", False):
       stream_options = {"include_usage": True}
       try:
+        _TELEMETRY(calling_chat_completions_create=True)
         stream = self._client.chat.completions.create(
             model=self._model_name,
             messages=messages,
-            timeout=self._api_options.get("timeout", 300),
+            timeout=httpx.Timeout(
+                self._api_options.get(
+                    "timeout", 3600  # 1 hour, same as the standard turn timeout
+                )
+            ),
             stream=True,
             stream_options=stream_options,
             **config,
         )
       except openai.NotFoundError as e:
+        _TELEMETRY(chat_completions_create_not_found_error=str(e))
         raise model_generation.DoNotRetryError(str(e)) from e
       except Exception as e:
+        _TELEMETRY(chat_completions_create_exception=str(e))
         logging.exception("Error during OpenAI stream: %s", e)
         raise e
+
+      _TELEMETRY(chat_completions_create_success=True)
 
       processed_stream = _process_openai_chat_completions_stream(stream)
 
@@ -310,30 +380,48 @@ class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
           "stream_options": stream_options,
       }
       response_for_logging = {
+          # Only log response chunks with usage information to avoid bloat.
           "response_chunks": [
-              chunk.to_dict() for chunk in processed_stream.response_chunks
+              chunk.to_dict()
+              for chunk in processed_stream.response_chunks
+              if chunk.usage is not None
           ]
       }
 
-      return tournament_util.GenerateReturn(
-          main_response=processed_stream.main_response,
-          main_response_and_thoughts="",
+      main_response, main_response_and_thoughts = (
+          _unpack_thoughts_from_openai_response(processed_stream.main_response)
+      )
+
+      return model_generation.GenerateReturn(
+          main_response=main_response,
+          main_response_and_thoughts=main_response_and_thoughts,
           request_for_logging=request_for_logging,
           response_for_logging=response_for_logging,
           generation_tokens=processed_stream.completion_tokens,
           prompt_tokens=processed_stream.prompt_tokens,
           reasoning_tokens=processed_stream.reasoning_tokens,
+          total_tokens=processed_stream.total_tokens,
       )
 
     try:
+      _TELEMETRY(calling_chat_completions_create=True)
       completion = self._client.chat.completions.create(
           model=self._model_name,
           messages=messages,
-          timeout=self._api_options.get("timeout", 1200),
+          timeout=self._api_options.get(
+              "timeout", 3600  # 1 hour, same as the standard turn timeout
+          ),
           **config,
       )
     except openai.NotFoundError as e:
+      _TELEMETRY(chat_completions_create_not_found_error=str(e))
       raise model_generation.DoNotRetryError(str(e)) from e
+    except Exception as e:
+      _TELEMETRY(chat_completions_create_exception=str(e))
+      logging.exception("Error during OpenAI stream: %s", e)
+      raise e
+
+    _TELEMETRY(chat_completions_create_success=True)
 
     if not isinstance(completion, openai_chat_completion_types.ChatCompletion):
       raise ValueError(
@@ -362,13 +450,18 @@ class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
     if content is None:
       logging.warning(
           "OpenAI Chat Completion return content is None. Returning empty"
-          " string. Request: %s", request_for_logging
+          " string. Request: %s",
+          request_for_logging,
       )
       content = ""
 
-    return tournament_util.GenerateReturn(
-        main_response=content,
-        main_response_and_thoughts="",
+    main_response, main_response_and_thoughts = (
+        _unpack_thoughts_from_openai_response(content)
+    )
+
+    return model_generation.GenerateReturn(
+        main_response=main_response,
+        main_response_and_thoughts=main_response_and_thoughts,
         request_for_logging=request_for_logging,
         response_for_logging=response_for_logging,
         generation_tokens=completion_tokens,
@@ -377,26 +470,41 @@ class OpenAIChatCompletionsModel(model_generation.MultimodalModel):
     )
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     content = [{"type": "text", "text": model_input.prompt_text}]
     return self._generate(content, model_input.system_instruction)
 
   def generate_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
-  ) -> tournament_util.GenerateReturn:
-    content = [{"type": "text", "text": model_input.prompt_text}]
+      self, model_input: model_generation.ModelImageTextInput
+  ) -> model_generation.GenerateReturn:
     base64_image = base64.b64encode(model_input.prompt_image_bytes).decode(
         "utf-8"
     )
-    content.append({
+    image_content = {
         "type": "image_url",
         "image_url": {
             "url": (
                 f"data:{model_input.prompt_image_mime_type};base64,{base64_image}"
             )
         },
-    })
+    }
+
+    if (
+        model_input.prompt_text_preceding_image is not None
+        and model_input.prompt_text_following_image is not None
+    ):
+      assert not model_input.prompt_text
+      content = [
+          {"type": "text", "text": model_input.prompt_text_preceding_image},
+          image_content,
+          {"type": "text", "text": model_input.prompt_text_following_image},
+      ]
+    else:
+      content = [
+          {"type": "text", "text": model_input.prompt_text},
+          image_content,
+      ]
     return self._generate(content, model_input.system_instruction)
 
 
@@ -510,7 +618,7 @@ class AnthropicModel(model_generation.Model):
       self,
       messages: Sequence[Mapping[str, Any]],
       system_instruction: str | None = None,
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     if self._model_options is None:
       self._model_options = {}
     if self._api_options is None:
@@ -597,39 +705,55 @@ class AnthropicModel(model_generation.Model):
     }
 
     # Anthropic does not return the reasoning token count separately.
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         **dataclasses.asdict(anthropic_return),
         request_for_logging=request_for_logging,
         response_for_logging=response_for_logging,
     )
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     messages = [{"role": "user", "content": model_input.prompt_text}]
     return self._generate(messages, model_input.system_instruction)
 
   def generate_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
+      self, model_input: model_generation.ModelImageTextInput
   ):
     base64_image = base64.b64encode(model_input.prompt_image_bytes).decode(
         "utf-8"
     )
-    messages = [{
-        "role": "user",
-        "content": [
-            {
-                "type": "text",
-                "text": model_input.prompt_text,
-            },
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": model_input.prompt_image_mime_type,
-                    "data": base64_image,
-                },
-            },
-        ],
-    }]
+    image_content = {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": model_input.prompt_image_mime_type,
+            "data": base64_image,
+        },
+    }
+
+    if (
+        model_input.prompt_text_preceding_image is not None
+        and model_input.prompt_text_following_image is not None
+    ):
+      assert not model_input.prompt_text
+      messages = [{
+          "role": "user",
+          "content": [
+              {"type": "text", "text": model_input.prompt_text_preceding_image},
+              image_content,
+              {"type": "text", "text": model_input.prompt_text_following_image},
+          ],
+      }]
+    else:
+      messages = [{
+          "role": "user",
+          "content": [
+              {
+                  "type": "text",
+                  "text": model_input.prompt_text,
+              },
+              image_content,
+          ],
+      }]
     return self._generate(messages, model_input.system_instruction)

@@ -27,52 +27,39 @@ from typing import Any, Mapping, Sequence
 from absl import logging
 import aiohttp
 from game_arena.harness import model_generation
-from game_arena.harness import tournament_util
 import requests
 
 
-DEEPSEEK_THOUGHT_TAG_START = "<think>"
-DEEPSEEK_THOUGHT_TAG_END = "</think>"
-
-
-def _deepseek_separate_main_response_and_thoughts(
-    response: str,
-) -> tuple[str, str] | None:
-  """Separates the main response and thoughts from a Deepseek response.
-
-  Args:
-    response: The response from the Deepseek model.
-
-  Returns:
-    A tuple of the main response and thoughts, or None if the tags are not
-    present.
-  """
-  if DEEPSEEK_THOUGHT_TAG_START not in response:
-    return None
-  else:
-    thoughts_and_response = response.split(DEEPSEEK_THOUGHT_TAG_START)[1]
-    if DEEPSEEK_THOUGHT_TAG_END in thoughts_and_response:
-      thoughts = thoughts_and_response.split(DEEPSEEK_THOUGHT_TAG_END)[0]
-      main_response = thoughts_and_response.split(DEEPSEEK_THOUGHT_TAG_END)[1]
-      return main_response, thoughts
-
-
 def _create_image_text_content(
-    model_input: tournament_util.ModelImageTextInput,
+    model_input: model_generation.ModelImageTextInput,
 ):
   """Creates content payload with text followed by image."""
-  content = [{"type": "text", "text": model_input.prompt_text}]
   base64_image = base64.b64encode(model_input.prompt_image_bytes).decode(
       "utf-8"
   )
-  content.append({
+  image_content = {
       "type": "image_url",
       "image_url": {
           "url": (
               f"data:{model_input.prompt_image_mime_type};base64,{base64_image}"
           )
       },
-  })
+  }
+  if (
+      model_input.prompt_text_preceding_image is not None
+      and model_input.prompt_text_following_image is not None
+  ):
+    assert not model_input.prompt_text
+    content = [
+        {"type": "text", "text": model_input.prompt_text_preceding_image},
+        image_content,
+        {"type": "text", "text": model_input.prompt_text_following_image},
+    ]
+  else:
+    content = [
+        {"type": "text", "text": model_input.prompt_text},
+        image_content,
+    ]
   return content
 
 
@@ -108,7 +95,7 @@ class TogetherAIModel(model_generation.MultimodalModel):
       self,
       content: Sequence[Mapping[str, Any]],
       system_instruction: str | None = None,
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     messages = []
     if system_instruction is not None:
       messages.append({"role": "system", "content": system_instruction})
@@ -242,7 +229,9 @@ class TogetherAIModel(model_generation.MultimodalModel):
     main_response_and_thoughts = ""
 
     if "deepseek" in self._model_name.lower():
-      maybe_separated = _deepseek_separate_main_response_and_thoughts(content)
+      maybe_separated = model_generation.separate_main_response_and_thoughts(
+          content
+      )
       if maybe_separated is not None:
         main_response = maybe_separated[0]
         main_response_and_thoughts = content
@@ -254,7 +243,7 @@ class TogetherAIModel(model_generation.MultimodalModel):
       generation_tokens = usage["completion_tokens"]
       prompt_tokens = usage["prompt_tokens"]
 
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         main_response=main_response,
         main_response_and_thoughts=main_response_and_thoughts,
         request_for_logging=request,
@@ -264,14 +253,14 @@ class TogetherAIModel(model_generation.MultimodalModel):
     )
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     content = [{"type": "text", "text": model_input.prompt_text}]
     return self._generate(content, model_input.system_instruction)
 
   def generate_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelImageTextInput
+  ) -> model_generation.GenerateReturn:
     content = _create_image_text_content(model_input)
     return self._generate(content, model_input.system_instruction)
 
@@ -309,6 +298,7 @@ class XAIModel(model_generation.MultimodalModel):
   # TODO(google-deepmind): Add error handling.
   def _post_request(self, request: Mapping[str, Any], stream: bool):
     """Sends a POST request to the xAI API and handles errors."""
+    assert self._api_options is not None
     timeout = self._api_options.get("timeout", 20 * 60)
     try:
       response = requests.post(
@@ -339,7 +329,7 @@ class XAIModel(model_generation.MultimodalModel):
   def _generate(
       self,
       messages: Sequence[Mapping[str, Any]],
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     request = {
         "model": self._model_name,
         "messages": messages,
@@ -388,7 +378,7 @@ class XAIModel(model_generation.MultimodalModel):
         if full_reasoning_content
         else ""
     )
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         main_response=full_content,
         main_response_and_thoughts=main_response_and_thoughts,
         request_for_logging=request,
@@ -447,7 +437,7 @@ class XAIModel(model_generation.MultimodalModel):
   def _generate_streaming(
       self,
       messages: Sequence[Mapping[str, Any]],
-  ) -> tournament_util.GenerateReturn:
+  ) -> model_generation.GenerateReturn:
     request = {
         "model": self._model_name,
         "messages": messages,
@@ -554,7 +544,7 @@ class XAIModel(model_generation.MultimodalModel):
         if full_reasoning_content
         else ""
     )
-    return tournament_util.GenerateReturn(
+    return model_generation.GenerateReturn(
         main_response=full_content,
         main_response_and_thoughts=main_response_and_thoughts,
         request_for_logging=request,
@@ -565,8 +555,8 @@ class XAIModel(model_generation.MultimodalModel):
     )
 
   def generate_with_text_input(
-      self, model_input: tournament_util.ModelTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelTextInput
+  ) -> model_generation.GenerateReturn:
     messages = []
     if model_input.system_instruction is not None:
       messages.append(
@@ -584,8 +574,8 @@ class XAIModel(model_generation.MultimodalModel):
       return self._generate(messages)
 
   def generate_with_image_text_input(
-      self, model_input: tournament_util.ModelImageTextInput
-  ) -> tournament_util.GenerateReturn:
+      self, model_input: model_generation.ModelImageTextInput
+  ) -> model_generation.GenerateReturn:
     if "grok-3" in self._model_name:
       raise model_generation.UnsupportedCapabilityError(
           f"Model {self._model_name} does not support image input."

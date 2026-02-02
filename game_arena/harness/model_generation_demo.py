@@ -18,6 +18,7 @@ import concurrent.futures
 import dataclasses
 import datetime
 import importlib.resources
+import os
 import pathlib
 import time
 import traceback
@@ -27,7 +28,7 @@ from absl import flags
 from game_arena.harness import model_generation
 from game_arena.harness import model_generation_http
 from game_arena.harness import model_generation_sdk
-from game_arena.harness import tournament_util
+from game_arena.harness import model_registry
 
 # Default values will run everything.
 
@@ -35,18 +36,21 @@ FLAGS = flags.FLAGS
 flags.DEFINE_list(
     "model_names",
     [
-        "gemini",
-        "openai_sync",
-        "openai_streaming",
+        # keep-sorted start
         "anthropic",
-        "deepseek",
-        "kimi",
-        "xai_grok-4_streaming",
-        "xai_grok-3-mini-fast_streaming",
-        "xai_grok-3-mini-fast_sync",
         "anthropic_streaming",
         "anthropic_sync",
+        "deepseek",
+        "gemini",
+        "kimi",
+        "openai_streaming",
+        "openai_sync",
         "qwen3_thinking_parallel",
+        "xai_grok-3-mini-fast_streaming",
+        "xai_grok-3-mini-fast_sync",
+        "xai_grok-4_streaming",
+        # keep-sorted end
+
     ],
     "Comma-separated list of model names to use (e.g.,"
     " 'gemini,xai_grok-4_streaming'). Defaults to all available models.",
@@ -72,7 +76,7 @@ class FutureInfo:
 def write_to_file(
     output_folder: pathlib.Path,
     model_input: Any,
-    response: tournament_util.GenerateReturn | str,
+    response: model_generation.GenerateReturn | str,
     run_name: str,
     model_name: str,
     response_time: datetime.timedelta,
@@ -114,7 +118,7 @@ def main(_) -> None:
   selected_modalities = FLAGS.use_modality
 
   if "text" in selected_modalities:
-    text_input = tournament_util.ModelTextInput(
+    text_input = model_generation.ModelTextInput(
         prompt_text="""Let's play chess. The current game state in Forsyth-Edwards Notation (FEN) notation is:
 rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2
 The moves played so far are:
@@ -129,16 +133,18 @@ It is now your turn. Play your strongest move. The move MUST be legal. Reason st
 
   if "image" in selected_modalities:
     image_path = importlib.resources.files("game_arena").joinpath(
-        "chess_puzzle_image.png"
+        "harness", "chess_puzzle_image.png"
     )
     with open(str(image_path), "rb") as image_file:
       image_bytes = image_file.read()
-    image_input = tournament_util.ModelImageTextInput(
+    image_input = model_generation.ModelImageTextInput(
         prompt_text=(
             "This is a chess puzzle. What is the best next move for white?"
         ),
         prompt_image_bytes=image_bytes,
         prompt_image_mime_type="image/png",
+        prompt_text_preceding_image="We are playing chess.",
+        prompt_text_following_image="To play: ",
         system_instruction=None,
     )
     print("Image-text prompt: ", image_input.prompt_text)
@@ -146,21 +152,7 @@ It is now your turn. Play your strongest move. The move MUST be legal. Reason st
     image_input = None
 
   models = {
-      "gemini": model_generation_sdk.AIStudioModel(
-          model_name="models/gemini-2.5-flash",
-          api_options={"include_thoughts": True},
-      ),
-      "openai_sync": model_generation_sdk.OpenAIChatCompletionsModel(
-          model_name="o3",
-          api_options={"timeout": 60 * 10},  # 10 minutes
-      ),
-      "openai_streaming": model_generation_sdk.OpenAIChatCompletionsModel(
-          model_name="o3",
-          api_options={
-              "timeout": 60 * 10,  # 10 minutes
-              "stream": True,
-          },
-      ),
+      # keep-sorted start
       "anthropic": model_generation_sdk.AnthropicModel(
           model_name="claude-sonnet-4-20250514",
       ),
@@ -182,12 +174,27 @@ It is now your turn. Play your strongest move. The move MUST be legal. Reason st
       "deepseek": model_generation_http.TogetherAIModel(
           model_name="deepseek-ai/DeepSeek-R1-0528-tput",
       ),
+      "gemini": model_generation_sdk.AIStudioModel(
+          model_name="models/gemini-2.5-flash",
+          api_options={"include_thoughts": True},
+      ),
       "kimi": model_generation_http.TogetherAIModel(
           model_name="moonshotai/Kimi-K2-Instruct",
       ),
-      "xai_grok-4_streaming": model_generation_http.XAIModel(
-          model_name="grok-4",
-          api_options={"stream": True},
+      "openai_streaming": model_generation_sdk.OpenAIChatCompletionsModel(
+          model_name="o3",
+          api_options={
+              "timeout": 60 * 10,  # 10 minutes
+              "stream": True,
+          },
+      ),
+      "openai_sync": model_generation_sdk.OpenAIChatCompletionsModel(
+          model_name="o3",
+          api_options={"timeout": 60 * 10},  # 10 minutes
+      ),
+      "qwen3_thinking_parallel": model_generation_http.TogetherAIModel(
+          model_name="Qwen/Qwen3-235B-A22B-Thinking-2507",
+          api_options={"parallel_attempts": 3, "timeout": 45},
       ),
       "xai_grok-3-mini-fast_streaming": model_generation_http.XAIModel(
           model_name="grok-3-mini-fast",
@@ -197,17 +204,18 @@ It is now your turn. Play your strongest move. The move MUST be legal. Reason st
           model_name="grok-3-mini-fast",
           api_options={"stream": False},
       ),
-      "qwen3_thinking_parallel": model_generation_http.TogetherAIModel(
-          model_name="Qwen/Qwen3-235B-A22B-Thinking-2507",
-          api_options={"parallel_attempts": 3, "timeout": 45},
+      "xai_grok-4_streaming": model_generation_http.XAIModel(
+          model_name="grok-4",
+          api_options={"stream": True},
       ),
+      # keep-sorted end
   }
 
   overall_start_time = time.monotonic()
 
   with concurrent.futures.ThreadPoolExecutor() as executor:
     future_to_info: dict[
-        concurrent.futures.Future[tournament_util.GenerateReturn], FutureInfo
+        concurrent.futures.Future[model_generation.GenerateReturn], FutureInfo
     ] = {}
 
     def submit_and_track(

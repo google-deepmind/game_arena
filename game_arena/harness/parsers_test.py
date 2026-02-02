@@ -15,6 +15,7 @@
 """Tests for move parsers."""
 
 from game_arena.harness import parsers
+from game_arena.harness.games.chess import parsers as chess_parsers
 from absl.testing import absltest
 from absl.testing import parameterized
 
@@ -180,6 +181,22 @@ Final Answer: <answer>e5</answer>"""
         'e5',
     )
 
+  def test_poker(self):
+    raw_response = """
+[Assumption]: I am assuming the villain is an unknown, reasonably competent player. In the absence of specific reads suggesting he is weak or prone to spewy plays, I should default to a GTO-based, fundamentally sound strategy. This means respecting his polarized shove and assuming he has a mathematically sound ratio of value to bluffs, against which my specific hand is not profitable enough to call.
+Key Variables:
+Pot Odds: The requirement of 37.2% equity sets a high bar for a drawing hand.
+Opponent's Range Construction: The entire decision rests on whether Villain's range is a) GTO-polarized (making this a fold) or b) weak/wide and includes many one-pair hands (making this a marginal call).
+Stack Preservation: I have a commanding stack lead (192 vs 35). Making a high-variance, marginal call that could significantly reduce this lead is less desirable than making a tight fold and continuing to apply pressure with my stack advantage in future hands.
+Future Plan:
+N/A. This decision ends the hand for me, one way or the other.
+Final Answer: CALL 22
+""".strip()
+    self.assertEqual(
+        parsers.parse_move_from_response(raw_response)['move'],
+        'CALL22',
+    )
+
 
 class ChessSoftParserV1Test(parameterized.TestCase):
 
@@ -205,6 +222,14 @@ class ChessSoftParserV1Test(parameterized.TestCase):
           ['Nf3'],
           'Nf3',
       ),
+      (
+          'with_dots_and_space',
+          'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2',
+          '2... Nf3',
+          ['Nf3'],
+          'Nf3',
+      ),
+
       (
           'with_extra_chars',
           'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1',
@@ -243,12 +268,68 @@ class ChessSoftParserV1Test(parameterized.TestCase):
           ['exf6'],
           'exf6',
       ),
+      (
+          'kingside_castling_with_numeric_0',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQK2R w KQkq - 1 6',
+          '0-0',
+          ['O-O'],
+          'O-O',
+      ),
+      (
+          'kingside_castling_with_numeric_0_with_step_number',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQK2R w KQkq - 1 6',
+          '6. 0-0',
+          ['O-O'],
+          'O-O',
+      ),
+      (
+          'queenside_castling_with_numeric_0',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQ1RK1 b kq - 2 6',
+          '0-0-0',
+          ['O-O-O'],
+          'O-O-O',
+      ),
+      (
+          'queenside_castling_with_numeric_0_with_step_number',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQ1RK1 b kq - 2 6',
+          '6... 0-0-0',
+          ['O-O-O'],
+          'O-O-O',
+      ),
+      (
+          'kingside_castling_with_letter_O',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQK2R w KQkq - 1 6',
+          'O-O',
+          ['O-O'],
+          'O-O',
+      ),
+      (
+          'kingside_castling_with_letter_O_with_step_number',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQK2R w KQkq - 1 6',
+          '6. O-O',
+          ['O-O'],
+          'O-O',
+      ),
+      (
+          'queenside_castling_with_letter_O',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQ1RK1 b kq - 2 6',
+          'O-O-O',
+          ['O-O-O'],
+          'O-O-O',
+      ),
+      (
+          'queenside_castling_with_letter_O_with_step_number',
+          'r3kbnr/pppn1ppp/4P3/1B4q1/8/5N1b/PPPP1PPP/RNBQ1RK1 b kq - 2 6',
+          '6... O-O-O',
+          ['O-O-O'],
+          'O-O-O',
+      ),
   )
   def test_chess_soft_parser(
       self, state_str, selected_action, spiel_legal_moves, expected_move
   ):
     self.assertEqual(
-        parsers._chess_soft_parser_v1(
+        chess_parsers.chess_soft_parser_v1(
             state_str, selected_action, spiel_legal_moves
         ),
         expected_move,

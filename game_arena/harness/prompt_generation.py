@@ -14,42 +14,46 @@
 
 """Library for generating prompts using templates."""
 
-from typing import Generic, Protocol, runtime_checkable
+from typing import Any, Generic, Mapping, Protocol, runtime_checkable
+from game_arena.harness import base_game
+from game_arena.harness import model_generation
+from game_arena.harness import prompt_templates
 from game_arena.harness import prompts
-from game_arena.harness import tournament_util
-import pyspiel
 
 
 @runtime_checkable
 class PromptGeneratorSupportsImageText(
-    Generic[tournament_util.ModelImageTextInputT], Protocol
+    Generic[model_generation.ModelImageTextInputT], Protocol
 ):
   """Generator of prompts containing text and e.g. a board image."""
 
-  # Keep dependency on PySpiel state as we may use prompt generators with
-  # renderers that work with PySpiel or call PySpiel for rendering:
+  def is_valid_prompt_template(self, prompt_template: str) -> bool:
+    ...
+
+  # Keep dependency on game state as we may use prompt generators with
+  # renderers that work with PySpiel or other environment for rendering.
   def generate_prompt_with_image_text(
       self,
-      prompt_template: prompts.PromptTemplate,
-      game_short_name: str,
-      state: pyspiel.State | None = None,
+      prompt_template: str,
+      game_adapter: base_game.BaseGameEnvAdapter,
+      prompt_configuration: Mapping[str, Any] | None = None,
       **prompt_substitutions,
-  ) -> tournament_util.ModelImageTextInputT:
+  ) -> model_generation.ModelImageTextInputT:
     ...
 
 
 @runtime_checkable
 class PromptGeneratorSupportsText(
-    Generic[tournament_util.ModelTextInputT], Protocol
+    Generic[model_generation.ModelTextInputT], Protocol
 ):
   """Generator of prompts containing text only."""
 
   def generate_prompt_with_text_only(
       self,
-      prompt_template: prompts.PromptTemplate,
+      prompt_template: str,
       game_short_name: str,
       **prompt_substitutions,
-  ) -> tournament_util.ModelTextInputT:
+  ) -> model_generation.ModelTextInputT:
     ...
 
 
@@ -58,45 +62,51 @@ class PromptGeneratorText(PromptGeneratorSupportsText):
 
   def generate_prompt_with_text_only(
       self,
-      prompt_template: prompts.PromptTemplate,
+      prompt_template: str,
       game_short_name: str,
       **prompt_substitutions,
-  ) -> tournament_util.ModelTextInput:
+  ) -> model_generation.ModelTextInput:
     prompt_substitutions["game_short_name"] = game_short_name
-    match prompt_template:
-      case prompts.PromptTemplate.NO_LEGAL_ACTIONS:
-        actual_template = prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS
-      case prompts.PromptTemplate.NO_LEGAL_ACTIONS_RETHINK_APPENDED:
-        actual_template = (
-            prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS_RETHINK_APPENDED
-        )
-      case prompts.PromptTemplate.NO_LEGAL_ACTIONS_WITH_PIECE_DICT:
-        actual_template = (
-            prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS_WITH_PIECE_DICT
-        )
-      case (
-          prompts.PromptTemplate.NO_LEGAL_ACTIONS_WITH_PIECE_DICT_RETHINK_APPENDED
-      ):
-        actual_template = (
-            prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS_WITH_PIECE_DICT_RETHINK_APPENDED
-        )
-      case prompts.PromptTemplate.NO_LEGAL_ACTIONS_WITH_ASCII_BOARD:
-        actual_template = (
-            prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS_WITH_ASCII_BOARD
-        )
-      case (
-          prompts.PromptTemplate.NO_LEGAL_ACTIONS_WITH_ASCII_BOARD_RETHINK_APPENDED
-      ):
-        actual_template = (
-            prompts.PROMPT_TEMPLATE_NO_LEGAL_ACTIONS_WITH_ASCII_BOARD_RETHINK_APPENDED
-        )
-      case prompts.PromptTemplate.WITH_LEGAL_ACTIONS:
-        actual_template = prompts.PROMPT_TEMPLATE_WITH_LEGAL_ACTIONS
-      case _:
-        raise ValueError(f"Unsupported prompt template: {prompt_template}")
-    return tournament_util.ModelTextInput(
-        prompt_text=actual_template.format(**prompt_substitutions)
+    return model_generation.ModelTextInput(
+        prompt_text=prompt_template.format(**prompt_substitutions)
     )
 
 
-# TODO(google-deepmind): implement multimodal prompt generator.
+class PromptGeneratorImageText(PromptGeneratorSupportsImageText):
+  """Generator of prompts containing text and e.g. a board image."""
+
+  def is_valid_prompt_template(self, prompt_template: str) -> bool:
+    return prompt_template in (
+        prompt_templates.WITH_BOARD_IMAGE,
+        prompt_templates.WITH_BOARD_IMAGE_RETHINK_APPENDED,
+    )
+
+  def generate_prompt_with_image_text(
+      self,
+      prompt_template: str,
+      game_adapter: base_game.BaseGameEnvAdapter,
+      prompt_configuration: Mapping[str, Any] | None = None,
+      **prompt_substitutions,
+  ) -> model_generation.ModelImageTextInput:
+
+    if prompt_template not in prompts.IMAGE_TEXT_PROMPTS:
+      raise ValueError(
+          "generate_prompt_with_image_text should only be called for multimodal"
+          " prompt templates."
+      )
+
+    if game_adapter.native_state is None:
+      raise ValueError("Environment adapter state is None.")
+
+    prompt_substitutions["game_short_name"] = game_adapter.game_short_name
+    prompt_substitutions["readable_state_str"] = (
+        game_adapter.get_readable_state()
+    )
+    prompt_substitutions["additional_state_info_text"] = ""
+    if not self.is_valid_prompt_template(prompt_template):
+      raise ValueError(f"Unsupported prompt template: {prompt_template}")
+
+    raise NotImplementedError(
+        "generate_prompt_with_image_text is not supported for"
+        f" {game_adapter.game_short_name}"
+    )

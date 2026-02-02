@@ -16,13 +16,12 @@
 
 from absl import app
 from absl import flags
-from game_arena.harness import game_notation_examples
-from game_arena.harness import llm_parsers
 from game_arena.harness import model_generation_sdk
 from game_arena.harness import parsers
 from game_arena.harness import prompt_generation
-from game_arena.harness import prompts
-from game_arena.harness import tournament_util
+from game_arena.harness import prompt_templates
+from game_arena.harness.games.chess import game as chess_game
+from game_arena.harness.games.chess import parsers as chess_parsers
 import termcolor
 
 import pyspiel
@@ -48,22 +47,17 @@ _OPENAI_MODEL = flags.DEFINE_string(
     "OpenAI model to play as player two.",
 )
 
-_PARSER_CHOICE = flags.DEFINE_enum_class(
-    "parser_choice",
-    tournament_util.ParserChoice.RULE_THEN_SOFT,
-    tournament_util.ParserChoice,
-    "Move parser to use.",
-)
-
 
 def main(_) -> None:
   # Set up game:
   pyspiel_game = pyspiel.load_game("chess")
   pyspiel_state = pyspiel_game.new_initial_state()
+  chess_adapter = chess_game.ChessGameAdapter()
+  chess_adapter.native_state = pyspiel_state
 
   # Set up prompt generator:
   prompt_generator = prompt_generation.PromptGeneratorText()
-  prompt_template = prompts.PromptTemplate.NO_LEGAL_ACTIONS
+  prompt_template = prompt_templates.NO_LEGAL_ACTIONS
 
   # Set up model generation:
   model_player_one = model_generation_sdk.AIStudioModel(
@@ -73,54 +67,29 @@ def main(_) -> None:
       model_name=_OPENAI_MODEL.value
   )
 
-  # Set up parser;
-  # RULE_THEN_SOFT: rule-based (regex, replace, strip) then soft-matching
-  # against legal moves
-  # LLM_ONLY: feed the game-playing model's response to a separate LLM for
-  # move parsing
-  match _PARSER_CHOICE.value:
-    case tournament_util.ParserChoice.RULE_THEN_SOFT:
-      parser = parsers.ChainedMoveParser(
-          [parsers.RuleBasedMoveParser(), parsers.SoftMoveParser("chess")]
-      )
-    case tournament_util.ParserChoice.LLM_ONLY:
-      parser_model = model_generation_sdk.AIStudioModel(
-          model_name="gemini-2.5-flash"
-      )
-      parser = llm_parsers.LLMParser(
-          model=parser_model,
-          instruction_config=llm_parsers.OpenSpielChessInstructionConfig_V0,
-      )
-    case _:
-      raise ValueError(f"Unsupported parser choice: {_PARSER_CHOICE.value}")
+  parser = parsers.ChainedMoveParser(
+      [parsers.RuleBasedMoveParser(), chess_parsers.ChessSoftParser()]
+  )
 
   for move_number in range(_NUM_MOVES.value):
-    print(f"Pre-move debug string: {pyspiel_state.debug_string()}")
-    if pyspiel_state.is_terminal():
+    print(f"Pre-move debug string: {chess_adapter.native_state.debug_string()}")
+    if chess_adapter.native_state.is_terminal():
       print(colored("Game is terminal, ending move loop.", "red"))
       break
 
     print(colored(f"Commencing move {move_number}...", "green"))
 
     # 1. Generate the prompt from the game state:
+    chess_adapter = chess_game.ChessGameAdapter()
+
     prompt_substitutions = {
-        "readable_state_str": tournament_util.convert_to_readable_state(
-            game_short_name="chess",
-            state_str=pyspiel_state.to_string(),
-            current_player=pyspiel_state.current_player(),
-        ),
-        "move_history": (
-            tournament_util.get_action_string_history(pyspiel_state) or "None"
-        ),
-        "player_name": game_notation_examples.GAME_SPECIFIC_NOTATIONS["chess"][
-            "player_map"
-        ][pyspiel_state.current_player()],
-        "move_notation": game_notation_examples.GAME_SPECIFIC_NOTATIONS[
-            "chess"
-        ]["move_notation"],
-        "notation": game_notation_examples.GAME_SPECIFIC_NOTATIONS["chess"][
-            "state_notation"
+        "readable_state_str": chess_adapter.get_readable_state(),
+        "move_history": chess_adapter.get_action_string_history() or "None",
+        "player_name": chess_adapter.game_notation.player_map[
+            chess_adapter.native_state.current_player()
         ],
+        "move_notation": chess_adapter.game_notation.move_notation,
+        "notation": chess_adapter.game_notation.state_notation,
     }
     prompt = prompt_generator.generate_prompt_with_text_only(
         prompt_template=prompt_template,
@@ -130,15 +99,15 @@ def main(_) -> None:
     print(colored(f"Formatted prompt: {prompt.prompt_text}", "blue"))
 
     # 2. Call the model:
-    if pyspiel_state.current_player() == 0:
+    if chess_adapter.native_state.current_player() == 0:
       model = model_player_one
     else:
       model = model_player_two
     response = model.generate_with_text_input(prompt)
     print(
         colored(
-            f"Model player {pyspiel_state.current_player()} main response:"
-            f" {response.main_response}",
+            f"Model player {chess_adapter.native_state.current_player()} main"
+            f" response: {response.main_response}",
             "yellow",
         )
     )
@@ -148,9 +117,9 @@ def main(_) -> None:
         text=response.main_response,
         # TODO(google-deepmind): raw state str and readable state str should be
         # differentiated in signatures.
-        state_str=pyspiel_state.to_string(),
-        legal_moves=parsers.get_legal_action_strings(pyspiel_state),
-        player_number=pyspiel_state.current_player(),
+        state_str=chess_adapter.native_state.to_string(),
+        legal_moves=chess_adapter.legal_actions,
+        player_number=chess_adapter.native_state.current_player(),
     )
     parser_output = parser.parse(parser_input)
     if parser_output is None:
@@ -159,7 +128,9 @@ def main(_) -> None:
       print(colored(f"Parser output is {parser_output}.", "magenta"))
 
     # 4. Apply the move:
-    pyspiel_state.apply_action(pyspiel_state.string_to_action(parser_output))
+    chess_adapter.native_state.apply_action(
+        chess_adapter.native_state.string_to_action(parser_output)
+    )
 
 
 if __name__ == "__main__":
