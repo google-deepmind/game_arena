@@ -149,3 +149,25 @@ Quickstart or set `api_key` in the `Model` constructor.
 
 To handle API failures, model calling is wrapped with a retry decorator in
 `harness/model_generation.py`.
+
+### Support for Any OpenAI-Compatible Model
+
+Game Arena provides the class `OpenAIGenericAPIModel` in `harness/model_generation_http.py`. This allows you to use any OpenAI-compatible API, including models hosted locally, alongside standard OpenAI or Gemini integrations.
+
+Example usage:
+```python
+from game_arena.harness import model_generation_http
+
+model = OpenAIGenericAPIModel(
+    api_endpoint="http://127.0.0.1:8082/v1/chat/completions",
+    local_model=True,
+    model_options={"image_support": False}
+)
+```
+
+- `api_endpoint`(str): URL of your local or remote API.
+- `local_model`(bool, default: `False`): Set to True if the model runs locally.
+- `model_options` (dict, default: `{}`): Additional configuration options for the model.
+  - `image_support` (bool, default: `False`): Set to True to enable image support.
+
+This makes it easy to plug in any OpenAI-compatible model into Game Arena, whether cloud-hosted or running on your own machine.
